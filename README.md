@@ -1,5 +1,8 @@
 # Boundary Lab
 
+> **Legacy Ath fork.** This fork bundles the pre-2026-08 `ath.exe`, which works
+> under Wine on macOS. See [LEGACY_ATH.md](LEGACY_ATH.md).
+
 <img src="assets/mainwindow.png" alt="Boundary Lab main window" width="700">
 
 Boundary Lab is a GUI-based multiphysics acoustic simulation tool for loudspeaker design. It generates or imports loudspeaker meshes, infers exterior BEM, interior FEM, or coupled FEM-BEM-LEM solving from a configured physical system, and presents acoustic and electroacoustic results in a desktop application. Ath is bundled as a Generator Plugin with permission from Marcel Batik.
