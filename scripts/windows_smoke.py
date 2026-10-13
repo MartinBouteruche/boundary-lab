@@ -51,7 +51,7 @@ def main(argv=None):
         # The desktop launcher uses pythonw; test the exact meshing-child variant.
         sys.executable = str(Path(console_python).with_name("pythonw.exe"))
         generated = run_ath(
-            ath_exe=APP_ROOT / "ath/ath202608.exe", config_text=config, run_root=args.output / "geometry", timeout_s=180
+            ath_exe=APP_ROOT / "ath/ath.exe", config_text=config, run_root=args.output / "geometry", timeout_s=180
         )
     finally:
         sys.executable = console_python

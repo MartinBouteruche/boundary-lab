@@ -1,4 +1,11 @@
-"""Ath4 command-line integration helpers."""
+"""Ath4 command-line integration helpers.
+
+This fork drives the legacy ``ath.exe`` (pre-2026-08) instead of the blab-mode
+``ath202608.exe``.  Legacy Ath reads ``OutputRootDir`` from an ``ath.cfg`` in its
+working directory, writes an ABEC project containing ``bem_mesh.geo``, and records
+symmetry in ``solving.txt``.  That GEO is then meshed by the same in-process Gmsh
+worker used for blab-mode output, so everything downstream is unchanged.
+"""
 
 from __future__ import annotations
 
@@ -42,6 +49,9 @@ ATH_QUADRANTS_RE = re.compile(r"^\s*Mesh\.Quadrants\s*=\s*(\S+)\s*$", re.IGNOREC
 ATH_GEO_MESH_RE = re.compile(r"^\s*Mesh\s+2\s*;\s*$", re.IGNORECASE)
 ATH_GEO_SAVE_RE = re.compile(r'^\s*Save\s+"[^"]+"\s*;\s*$', re.IGNORECASE)
 ATH_GMSH_LOCK = threading.RLock()
+ATH_CFG_OUTPUT_ROOT_KEY = "OutputRootDir"
+ATH_LEGACY_GEO_NAME = "bem_mesh.geo"
+SOLVING_SYM_RE = re.compile(r"\bSym\s*=\s*([A-Za-z]+)\b")
 
 
 class AthCancelledError(RuntimeError):
@@ -133,16 +143,41 @@ def ath_mirror_axes_from_config_text(config_text: str) -> tuple[str, ...]:
     )
 
 
+def ath_mirror_axes_from_solving_file(solving_path: Path) -> tuple[str, ...] | None:
+    """Return the symmetry axes legacy Ath recorded in an ABEC ``solving.txt``."""
+    if not solving_path.exists():
+        return None
+    match = SOLVING_SYM_RE.search(solving_path.read_text(encoding="utf-8", errors="replace"))
+    if match is None:
+        return ()
+    axes = []
+    for axis in match.group(1).lower():
+        if axis in {"x", "y"} and axis not in axes:
+            axes.append(axis)
+    return tuple(sorted(axes))
+
+
+def _write_legacy_ath_cfg(ath_cfg_path: Path, output_root: Path) -> None:
+    # Wine resolves absolute POSIX paths against the Z: drive, so the same
+    # value works natively and under Wine.
+    ath_cfg_path.write_text(f'{ATH_CFG_OUTPUT_ROOT_KEY} = "{output_root}"\n', encoding="utf-8")
+
+
+def _find_legacy_ath_geo(output_dir: Path) -> Path | None:
+    candidates = sorted(output_dir.glob(f"ABEC_*/{ATH_LEGACY_GEO_NAME}"))
+    return candidates[0] if candidates else None
+
+
 def _ath_process_command(ath_exe: Path, config_path: Path) -> list[str]:
     if sys.platform not in WINE_PLATFORMS:
-        return [str(ath_exe), str(config_path), "-b"]
+        return [str(ath_exe), str(config_path)]
 
     wine_exe = shutil.which("wine")
     if wine_exe is None:
         raise RuntimeError(
             "Ath.exe execution on Linux/macOS requires Wine, but no 'wine' executable was found on PATH."
         )
-    return [wine_exe, str(ath_exe), str(config_path), "-b"]
+    return [wine_exe, str(ath_exe), str(config_path)]
 
 
 @dataclass(frozen=True)
@@ -202,6 +237,8 @@ class AthProcessRunner:
         geo_path = output_dir / f"{case_name}.geo"
         log_path = output_dir / "ath.log"
         config_path.write_text(config_text, encoding="utf-8")
+        # Legacy Ath writes into OutputRootDir/<config stem>, i.e. output_dir.
+        _write_legacy_ath_cfg(output_dir / "ath.cfg", run_root)
 
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         if os.name == "nt":
@@ -228,19 +265,23 @@ class AthProcessRunner:
         if self._cancel_requested:
             raise AthCancelledError("Ath generation cancelled")
 
-        # Preserve Ath diagnostics even when generation fails.  Some geometry
-        # errors are only explained on stderr in blab mode.
-        log_path.write_text(stderr, encoding="utf-8", newline="")
-        if stdout:
-            geo_path.write_text(stdout, encoding="utf-8", newline="")
+        # Preserve Ath diagnostics even when generation fails.  Legacy Ath
+        # reports progress and most errors on stdout.
+        log_path.write_text(stdout + stderr, encoding="utf-8", newline="")
 
         returncode = 0 if process is None else process.returncode
         if returncode != 0:
-            message = stderr.strip() or stdout.strip()
+            message = stdout.strip() or stderr.strip()
             raise RuntimeError(f"Ath failed with exit code {returncode}: {message}")
 
-        if not stdout.strip():
-            raise RuntimeError("Ath blab mode produced no Gmsh GEO output.")
+        legacy_geo_path = _find_legacy_ath_geo(output_dir)
+        if legacy_geo_path is None:
+            message = stdout.strip() or stderr.strip()
+            raise RuntimeError(f"Ath produced no {ATH_LEGACY_GEO_NAME} in {output_dir}: {message}")
+        shutil.copyfile(legacy_geo_path, geo_path)
+        solving_axes = ath_mirror_axes_from_solving_file(legacy_geo_path.parent / "solving.txt")
+        if solving_axes is not None:
+            mirror_axes = solving_axes
 
         if status_callback is not None:
             status_callback("Meshing Ath geometry...")

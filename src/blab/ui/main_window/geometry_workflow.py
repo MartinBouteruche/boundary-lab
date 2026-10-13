@@ -62,11 +62,11 @@ class GeometryWorkflowController(QObject):
     # -- Ath runtime --------------------------------------------------------
 
     def _find_ath_exe(self) -> Path:
-        bundled = ATH_BUNDLE_DIR / "ath202608.exe"
+        bundled = ATH_BUNDLE_DIR / "ath.exe"
         if bundled.exists():
             return bundled
         for root in (Path.cwd(), Path.cwd().parent):
-            candidate = root / "ath202608.exe"
+            candidate = root / "ath.exe"
             if candidate.exists():
                 return candidate
         return bundled

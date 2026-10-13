@@ -86,7 +86,20 @@ class _FakeAthProcess:
         return self.returncode
 
 
-def test_ath_process_runner_captures_blaba_output_and_launches_gmsh_worker(tmp_path: Path, monkeypatch) -> None:
+def _fake_legacy_ath_popen(popen_calls, *, solving: str | None = "Sym=xy", stdout: str = "", stderr: str = ""):
+    def fake_popen(*args, **kwargs):
+        popen_calls.append((args, kwargs))
+        abec_dir = Path(kwargs["cwd"]) / "ABEC_InfiniteBaffle"
+        abec_dir.mkdir()
+        (abec_dir / "bem_mesh.geo").write_text("Point(1) = {0, 0, 0, 1};", encoding="utf-8")
+        if solving is not None:
+            (abec_dir / "solving.txt").write_text(f"Control_Solver\n  Dim=3D; {solving}\n", encoding="utf-8")
+        return _FakeAthProcess(stdout=stdout, stderr=stderr)
+
+    return fake_popen
+
+
+def test_ath_process_runner_captures_legacy_output_and_launches_gmsh_worker(tmp_path: Path, monkeypatch) -> None:
     ath_dir = tmp_path / "ath"
     ath_dir.mkdir()
     ath_exe = ath_dir / "ath.exe"
@@ -94,9 +107,7 @@ def test_ath_process_runner_captures_blaba_output_and_launches_gmsh_worker(tmp_p
 
     popen_calls = []
 
-    def fake_popen(*args, **kwargs):
-        popen_calls.append((args, kwargs))
-        return _FakeAthProcess(stdout="Point(1) = {0, 0, 0, 1};", stderr="Ath diagnostic")
+    fake_popen = _fake_legacy_ath_popen(popen_calls, stdout="-calculating profiles\n", stderr="Ath diagnostic")
 
     worker_calls = []
 
@@ -113,12 +124,13 @@ def test_ath_process_runner_captures_blaba_output_and_launches_gmsh_worker(tmp_p
             reduced_cleaned_msh_path=kwargs["output_dir"] / "case_reduced.msh",
         )
 
+    monkeypatch.setattr("blab.ath.sys.platform", "win32")
     monkeypatch.setattr("blab.ath.subprocess.Popen", fake_popen)
     monkeypatch.setattr(AthProcessRunner, "_run_gmsh_worker", fake_worker)
 
     result = AthProcessRunner().run(
         ath_exe=ath_exe,
-        config_text="Length = 10\nMesh.Quadrants = 1",
+        config_text="Length = 10\nMesh.Quadrants = 14",
         run_root=tmp_path / "runs",
         case_name="case",
     )
@@ -126,15 +138,43 @@ def test_ath_process_runner_captures_blaba_output_and_launches_gmsh_worker(tmp_p
     output_dir = (tmp_path / "runs" / "case").resolve()
     config_path = output_dir / "case.cfg"
     assert result.cleaned_msh_path == output_dir / "case.msh"
-    assert config_path.read_text(encoding="utf-8") == "Length = 10\nMesh.Quadrants = 1"
+    assert config_path.read_text(encoding="utf-8") == "Length = 10\nMesh.Quadrants = 14"
+    assert (output_dir / "ath.cfg").read_text(encoding="utf-8") == f'OutputRootDir = "{output_dir.parent}"\n'
     assert (output_dir / "case.geo").read_text(encoding="utf-8") == "Point(1) = {0, 0, 0, 1};"
-    assert (output_dir / "ath.log").read_text(encoding="utf-8") == "Ath diagnostic"
-    assert popen_calls[0][0][0] == [str(ath_exe.resolve()), str(config_path), "-b"]
+    assert (output_dir / "ath.log").read_text(encoding="utf-8") == "-calculating profiles\nAth diagnostic"
+    assert popen_calls[0][0][0] == [str(ath_exe.resolve()), str(config_path)]
     assert popen_calls[0][1]["cwd"] == output_dir
     assert popen_calls[0][1]["creationflags"] == (
         getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     )
     assert worker_calls[0]["mirror_axes"] == ("x", "y")
+
+
+def test_ath_process_runner_falls_back_to_config_quadrants_without_solving_file(tmp_path: Path, monkeypatch) -> None:
+    ath_exe = tmp_path / "ath.exe"
+    ath_exe.write_text("", encoding="utf-8")
+    worker_calls = []
+    monkeypatch.setattr("blab.ath.sys.platform", "win32")
+    monkeypatch.setattr("blab.ath.subprocess.Popen", _fake_legacy_ath_popen([], solving=None))
+    monkeypatch.setattr(AthProcessRunner, "_run_gmsh_worker", lambda self, **kwargs: worker_calls.append(kwargs))
+
+    AthProcessRunner().run(
+        ath_exe=ath_exe, config_text="Mesh.Quadrants = 14", run_root=tmp_path / "runs", case_name="case"
+    )
+
+    assert worker_calls[0]["mirror_axes"] == ("x",)
+
+
+def test_ath_process_runner_reports_missing_legacy_geo(tmp_path: Path, monkeypatch) -> None:
+    ath_exe = tmp_path / "ath.exe"
+    ath_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr("blab.ath.sys.platform", "win32")
+    monkeypatch.setattr(
+        "blab.ath.subprocess.Popen", lambda *args, **kwargs: _FakeAthProcess(stdout="Parsing NULL expression!")
+    )
+
+    with pytest.raises(RuntimeError, match="no bem_mesh.geo.*Parsing NULL expression!"):
+        AthProcessRunner().run(ath_exe=ath_exe, config_text="Length = 10", run_root=tmp_path / "runs", case_name="case")
 
 
 @pytest.mark.parametrize("platform_name", ("linux", "darwin"))
@@ -148,9 +188,7 @@ def test_ath_process_runner_uses_wine_for_ath_exe_on_linux_or_macos(
 
     popen_calls = []
 
-    def fake_popen(*args, **kwargs):
-        popen_calls.append((args, kwargs))
-        return _FakeAthProcess(stdout="Point(1) = {0, 0, 0, 1};")
+    fake_popen = _fake_legacy_ath_popen(popen_calls)
 
     monkeypatch.setattr("blab.ath.sys.platform", platform_name)
     monkeypatch.setattr("blab.ath.shutil.which", lambda name: "/usr/bin/wine" if name == "wine" else None)
@@ -178,7 +216,6 @@ def test_ath_process_runner_uses_wine_for_ath_exe_on_linux_or_macos(
         "/usr/bin/wine",
         str(ath_exe.resolve()),
         str((tmp_path / "runs" / "case" / "case.cfg").resolve()),
-        "-b",
     ]
 
 
